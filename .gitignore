@@ -1,0 +1,13 @@
+.DS_Store
+*.xcuserstate
+xcuserdata/
+DerivedData/
+.build/
+*.swp
+
+# Xcode / SwiftPM
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# Build products
+build/
