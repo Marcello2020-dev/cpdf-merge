@@ -19,7 +19,6 @@ struct MergeView: View {
     @State private var statusText: String = "Bereit"
 
     // Output name prompt
-    @State private var showNamePrompt: Bool = false
     @State private var outputBaseName: String = "merged"   // without .pdf
 
     // Selection (for remove)
@@ -29,6 +28,13 @@ struct MergeView: View {
     @State private var draggedItem: URL? = nil
     
     @State private var bookmarkTitles: [URL: String] = [:]   // URL -> Bookmark-Titel
+    
+    @State private var lastMergedPDFURL: URL? = nil         // zuletzt erzeugte Merge-PDF
+    
+    @State private var showOverwriteAlert: Bool = false
+    @State private var pendingMove: (() -> Void)? = nil
+    @State private var pendingOverwritePath: String = ""
+    @State private var pendingCleanupDirURL: URL? = nil
 
     private func refreshBookmarksFromFilenames(overwrite: Bool) {
         for u in inputPDFs {
@@ -38,6 +44,16 @@ struct MergeView: View {
             }
         }
         statusText = overwrite ? "Bookmarks neu gesetzt" : "Bookmarks ergänzt"
+    }
+    
+    private func suggestedOutputBaseName() -> String {
+        guard let first = inputPDFs.first else { return "merged" }
+
+        // Dateiname der #1 (ohne Extension) buchstabenlaut identisch übernehmen
+        let base = first.deletingPathExtension().lastPathComponent
+
+        // Vorschlag: "<Dateiname> mit Anlagen"
+        return "\(base) mit Anlagen"
     }
 
     var body: some View {
@@ -65,24 +81,40 @@ struct MergeView: View {
                 Button("⇊") { moveSelectedToBottom() }
                     .disabled(selectedSingle == nil || inputPDFs.count < 2 || isRunning)
                 
-                Button("Bookmarks aktualisieren") { refreshBookmarksFromFilenames(overwrite: true) }
+                Button("Bookmarks zurücksetzen") { refreshBookmarksFromFilenames(overwrite: true) }
                     .disabled(inputPDFs.isEmpty || isRunning)
+                
 
                 Spacer()
+                
+                Button("Merge-PDF im Finder zeigen") { openLastMergedPDF() }
+                    .disabled(lastMergedPDFURL == nil || isRunning)
 
-                Button("Merge (Bookmarks)…") {
-                    outputBaseName = "merged"
-                    showNamePrompt = true
+                Button("Merge") {
+                    runMergeWithBookmarks(outputBaseName: FileOps.sanitizedBaseName(outputBaseName))
                 }
-                .disabled(inputPDFs.isEmpty || outputFolderURL == nil || isRunning)
+                .disabled(
+                    inputPDFs.isEmpty ||
+                    outputFolderURL == nil ||
+                    isRunning ||
+                    FileOps.sanitizedBaseName(outputBaseName).isEmpty
+                )
+                
+                .disabled(inputPDFs.isEmpty || outputFolderURL == nil || isRunning || FileOps.sanitizedBaseName(outputBaseName).isEmpty)
             }
 
             Text("Input (Reihenfolge = Merge-Reihenfolge; Drag & Drop zum Umsortieren):")
                 .font(.headline)
 
             List(selection: $selection) {
-                ForEach(inputPDFs, id: \.self) { url in
-                    HStack {
+                ForEach(Array(inputPDFs.enumerated()), id: \.element) { index, url in
+                    HStack(spacing: 10) {
+
+                        // Große, fette, konsistente Nummer (ändert sich automatisch bei Sort/Drag)
+                        Text("\(index + 1).")
+                            .font(.system(size: 20, weight: .bold))
+                            .frame(width: 42, alignment: .trailing)
+
                         Text(url.lastPathComponent)
                             .lineLimit(1)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -107,7 +139,7 @@ struct MergeView: View {
             }
             .frame(minHeight: 320)
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("Output Ordner:")
                         .font(.headline)
@@ -122,9 +154,17 @@ struct MergeView: View {
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(outputFolderURL == nil ? .secondary : .primary)
 
-                Text("Hinweis: Die fertige Datei wird bei Erfolg in „Merge“ darunter gespeichert.")
-                    .foregroundStyle(.secondary)
-                    .font(.footnote)
+                HStack(spacing: 10) {
+                    Text("Output-Dateiname:")
+                        .font(.headline)
+
+                    TextField("", text: $outputBaseName)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: .infinity)
+
+                    Text(".pdf")
+                        .foregroundStyle(.secondary)
+                }
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -133,44 +173,38 @@ struct MergeView: View {
                 Text(statusText)
                 TextEditor(text: $logText)
                     .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 180)
+                    .frame(minHeight: 140)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
             }
 
         }
         .padding(14)
         .frame(minWidth: 860, minHeight: 720)
-        .sheet(isPresented: $showNamePrompt) {
-            namePromptSheet
-        }
-    }
-
-    // MARK: - Name prompt sheet
-    private var namePromptSheet: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Output-Dateiname (ohne .pdf)")
-                .font(.headline)
-
-            TextField("", text: $outputBaseName)
-                .textFieldStyle(.roundedBorder)
-                .frame(minWidth: 520)
-
-            Text("Die Datei wird als PDF im gewählten Output-Ordner gespeichert.")
-                .foregroundStyle(.secondary)
-
-            HStack {
-                Button("Abbrechen") { showNamePrompt = false }
-                Spacer()
-                Button("Merge starten") {
-                    showNamePrompt = false
-                    runMergeWithBookmarks(outputBaseName: FileOps.sanitizedBaseName(outputBaseName))
+        .alert("Datei existiert bereits", isPresented: $showOverwriteAlert) {
+            Button("Abbrechen", role: .cancel) {
+                // Temp aufräumen (sonst bleibt es liegen)
+                if let dir = pendingCleanupDirURL {
+                    try? FileManager.default.removeItem(at: dir)
                 }
-                .keyboardShortcut(.defaultAction)
-                .disabled(FileOps.sanitizedBaseName(outputBaseName).isEmpty)
+                pendingCleanupDirURL = nil
+
+                pendingMove = nil
+                pendingOverwritePath = ""
+                statusText = "Abgebrochen"
             }
+            Button("Ersetzen", role: .destructive) {
+                pendingMove?()
+                pendingMove = nil
+                pendingOverwritePath = ""
+                pendingCleanupDirURL = nil
+            }
+        } message: {
+            Text("Die Datei existiert bereits:\n\(pendingOverwritePath)\n\nMöchtest du sie ersetzen?")
         }
-        .padding(16)
-        .frame(width: 620)
+        
+        .onChange(of: inputPDFs) { _, _ in
+            outputBaseName = suggestedOutputBaseName()
+        }
     }
 
     // MARK: - UI Actions
@@ -205,6 +239,11 @@ struct MergeView: View {
         guard let folder = FileDialogHelpers.chooseFolder() else { return }
         outputFolderURL = folder
         statusText = "Output-Ordner gesetzt"
+    }
+    
+    private func openLastMergedPDF() {
+        guard let url = lastMergedPDFURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     private func sortByFilename() {
@@ -256,40 +295,68 @@ struct MergeView: View {
     private func runMergeWithBookmarks(outputBaseName: String) {
         guard let baseOutFolder = outputFolderURL else { return }
 
-        // Final output will be placed later (only on success) into baseOutFolder/Merge
+        // Final output will be placed later (only on success) into baseOutFolder
         // For now we write into temp, so we don't create empty Merge folders.
 
         isRunning = true
         statusText = "Merge läuft…"
         logText = ""
         
-        func saveFinalPDF(from tmpURL: URL) {
-            let mergeFolder = baseOutFolder.appendingPathComponent("Merge", isDirectory: true)
+        func saveFinalPDF(from tmpURL: URL, cleanupDir: URL) {
+            // Zielpfad: direkt in den gewählten Output-Ordner (kein Merge-Unterordner)
+            let outFile = baseOutFolder
+                .appendingPathComponent(outputBaseName)
+                .appendingPathExtension("pdf")
 
-            do {
-                try FileManager.default.createDirectory(at: mergeFolder, withIntermediateDirectories: true)
+            let finalizeMove = {
+                do {
+                    // Wenn die Temp-Datei weg ist: Ziel NICHT anfassen
+                    guard FileManager.default.fileExists(atPath: tmpURL.path) else {
+                        self.statusText = "Fehler: Output speichern"
+                        self.logText += "Temp-Datei nicht gefunden (zu früh gelöscht?): \(tmpURL.path)\n"
+                        return
+                    }
 
-                let outFile = mergeFolder
-                    .appendingPathComponent(outputBaseName)
-                    .appendingPathExtension("pdf")
+                    if FileManager.default.fileExists(atPath: outFile.path) {
+                        // Atomarer Replace (kein „löschen dann move“)
+                        _ = try FileManager.default.replaceItemAt(
+                            outFile,
+                            withItemAt: tmpURL,
+                            backupItemName: nil,
+                            options: []
+                        )
+                    } else {
+                        try FileManager.default.moveItem(at: tmpURL, to: outFile)
+                    }
 
-                if FileManager.default.fileExists(atPath: outFile.path) {
-                    try FileManager.default.removeItem(at: outFile)
+                    self.lastMergedPDFURL = outFile
+                    self.statusText = "Fertig: \(outFile.lastPathComponent)"
+                    self.logText += "Saved to: \(outFile.path)\n"
+
+                    // Temp erst nach erfolgreichem Speichern löschen
+                    try? FileManager.default.removeItem(at: cleanupDir)
+                } catch {
+                    self.statusText = "Fehler: Output speichern"
+                    self.logText += "Could not save output: \(error)\n"
                 }
-
-                try FileManager.default.moveItem(at: tmpURL, to: outFile)
-
-                self.statusText = "Fertig: \(outFile.lastPathComponent)"
-                self.logText += "Saved to: \(outFile.path)\n"
-            } catch {
-                self.statusText = "Fehler: Output speichern"
-                self.logText += "Could not save output into Merge folder: \(error)\n"
             }
+
+            // Existiert schon? -> Nachfragen statt hart überschreiben
+            if FileManager.default.fileExists(atPath: outFile.path) {
+                pendingOverwritePath = outFile.path
+                pendingCleanupDirURL = cleanupDir
+                pendingMove = finalizeMove
+                showOverwriteAlert = true
+                return
+            }
+
+            // Sonst normal speichern
+            finalizeMove()
         }
 
         // Resolve cpdf (robust)
-        let cpdfPath = "/opt/homebrew/bin/cpdf"
-        logText += "Using cpdf: \(cpdfPath)\n"
+        let cpdfPath = CPDFService.defaultCPDFPath
+        logText += "Backend: PDFKit (Merge + Outline)\n"
 
         // 1) Page counts via PDFKit + build bookmark plan
         var starts: [(title: String, startPage: Int)] = []
@@ -345,10 +412,9 @@ struct MergeView: View {
             self.logText += "Step 2: bookmarks (PDFKit) -> \(finalTmp.lastPathComponent)\n"
             PDFKitOutline.applyOutline(to: mergedDoc, starts: starts)
             if mergedDoc.write(to: finalTmp) && PDFKitOutline.validateOutlinePersisted(at: finalTmp, expectedCount: starts.count) {
-                // Success: save finalTmp into Merge folder
+                // Success: save finalTmp into Output folder
                 self.isRunning = false
-                saveFinalPDF(from: finalTmp)
-                try? FileManager.default.removeItem(at: tempDir)
+                saveFinalPDF(from: finalTmp, cleanupDir: tempDir)
                 return
                 
             } else {
@@ -359,7 +425,8 @@ struct MergeView: View {
         }
         
         // Step 3: Fallback to cpdf add-bookmarks (create bookmarks.txt only now)
-
+        self.logText += "Fallback: cpdf (add-bookmarks) using: \(cpdfPath)\n"
+        
         do {
             try CPDFService.writeBookmarksFile(starts: starts, to: bookmarksTxt)
         } catch {
@@ -386,10 +453,8 @@ struct MergeView: View {
                     return
                 }
 
-                // Erfolgsfall: finalTmp -> Output/Merge/<name>.pdf
-                saveFinalPDF(from: finalTmp)
-                // Cleanup (best-effort)
-                try? FileManager.default.removeItem(at: tempDir)
+                // Erfolgsfall: finalTmp -> Output/<name>.pdf
+                saveFinalPDF(from: finalTmp, cleanupDir: tempDir)
             }
         }
     }
