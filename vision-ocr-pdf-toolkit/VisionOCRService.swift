@@ -11,6 +11,7 @@ import PDFKit
 import Vision
 import CoreGraphics
 import CoreText
+import CoreImage
 
 enum VisionOCRService {
 
@@ -18,10 +19,24 @@ enum VisionOCRService {
         var languages: [String] = ["de-DE", "en-US"]
         var recognitionLevel: VNRequestTextRecognitionLevel = .accurate
         var usesLanguageCorrection: Bool = true
-        /// Render scale relative to PDF points (72 dpi). 2.0–3.0 is a good practical range.
         var renderScale: CGFloat = 2.0
-        /// If true, pages that already contain extractable text are skipped.
         var skipPagesWithExistingText: Bool = true
+        var enableDeskewPreprocessing: Bool = true
+
+        // NEU:
+        /// Unterhalb dieser Schwelle wird nicht gedreht. Default 0.0 = keine Deadzone.
+        var minDeskewDegrees: Double = 0.0
+        /// Schutzgrenze gegen völlig absurde Schätzungen.
+        var maxDeskewDegrees: Double = 30.0
+    }
+    
+    private struct OCRBox {
+        let text: String
+        // Vision-normalized Quad (origin bottom-left)
+        let tl: CGPoint
+        let tr: CGPoint
+        let br: CGPoint
+        let bl: CGPoint
     }
 
     enum OCRError: Error, LocalizedError {
@@ -116,8 +131,65 @@ enum VisionOCRService {
                 throw OCRError.cannotRenderPage(pageIndex + 1)
             }
 
-            // Run Vision OCR
-            let observations = try recognizeText(on: cgImage, options: options)
+            // 1) optional deskew für OCR (Original-PDF bleibt unverändert)
+            let originalSize = CGSize(width: cgImage.width, height: cgImage.height)
+            let (ocrImage, appliedSkew): (CGImage, CGFloat)
+            if options.enableDeskewPreprocessing {
+                (ocrImage, appliedSkew) = Self.deskewForOCRIfNeeded(
+                    cgImage: cgImage,
+                    options: options,
+                    logger: { line in log?("Page \(pageIndex + 1) skew: \(line)") }
+                )
+            } else {
+                log?("Page \(pageIndex + 1) skew: disabled (enableDeskewPreprocessing=false)")
+                (ocrImage, appliedSkew) = (cgImage, 0)
+            }
+
+            // 2) OCR genau einmal ausführen
+            let observations = try recognizeText(on: ocrImage, options: options)
+
+            // 3) Beobachtungen -> OCRBox (Quad am Ende immer bezogen aufs ORIGINALBILD)
+            let boxes: [OCRBox] = observations.compactMap { obs in
+                guard let best = obs.topCandidates(1).first else { return nil }
+
+                // Versuche ein rotierbares Quad aus VNRecognizedText zu holen (Preview-Pfad)
+                let fullRange = best.string.startIndex..<best.string.endIndex
+                let rectObs: VNRectangleObservation? = (try? best.boundingBox(for: fullRange))
+
+                // Fallback: axis-aligned bbox -> Quad daraus bauen
+                func quadFromAxisAligned(_ bb: CGRect) -> (CGPoint, CGPoint, CGPoint, CGPoint) {
+                    let tl = CGPoint(x: bb.minX, y: bb.maxY)
+                    let tr = CGPoint(x: bb.maxX, y: bb.maxY)
+                    let br = CGPoint(x: bb.maxX, y: bb.minY)
+                    let bl = CGPoint(x: bb.minX, y: bb.minY)
+                    return (tl, tr, br, bl)
+                }
+
+                var tl: CGPoint
+                var tr: CGPoint
+                var br: CGPoint
+                var bl: CGPoint
+
+                if let r = rectObs {
+                    tl = r.topLeft
+                    tr = r.topRight
+                    br = r.bottomRight
+                    bl = r.bottomLeft
+                } else {
+                    let (qtl, qtr, qbr, qbl) = quadFromAxisAligned(obs.boundingBox)
+                    tl = qtl; tr = qtr; br = qbr; bl = qbl
+                }
+
+                // Wenn deskew angewandt wurde: Quad zurück in ORIGINAL-Koordinaten rotieren
+                if appliedSkew != 0 {
+                    tl = Self.mapNormalizedPointFromDeskewedToOriginal(tl, skewAngleRadians: appliedSkew, imageSize: originalSize)
+                    tr = Self.mapNormalizedPointFromDeskewedToOriginal(tr, skewAngleRadians: appliedSkew, imageSize: originalSize)
+                    br = Self.mapNormalizedPointFromDeskewedToOriginal(br, skewAngleRadians: appliedSkew, imageSize: originalSize)
+                    bl = Self.mapNormalizedPointFromDeskewedToOriginal(bl, skewAngleRadians: appliedSkew, imageSize: originalSize)
+                }
+
+                return OCRBox(text: best.string, tl: tl, tr: tr, br: br, bl: bl)
+            }
 
             // Write output page: original content + invisible text
             let pageInfo: [CFString: Any] = [
@@ -129,7 +201,7 @@ enum VisionOCRService {
             ]
             ctx.beginPDFPage(pageInfo as CFDictionary)
             drawPDFPage(cgPage, into: ctx, box: box, targetRect: targetRect, rotate: cgPage.rotationAngle)
-            overlayInvisibleText(observations, in: ctx, targetRect: targetRect, imageSize: CGSize(width: cgImage.width, height: cgImage.height), renderScale: options.renderScale)
+            overlayInvisibleText(boxes, in: ctx, targetRect: targetRect, imageSize: originalSize, renderScale: options.renderScale)
             ctx.endPDFPage()
         }
 
@@ -198,64 +270,88 @@ enum VisionOCRService {
     // MARK: - Invisible text overlay
 
     private static func overlayInvisibleText(
-        _ observations: [VNRecognizedTextObservation],
+        _ boxes: [OCRBox],
         in ctx: CGContext,
         targetRect: CGRect,
         imageSize: CGSize,
         renderScale: CGFloat
     ) {
-        guard !observations.isEmpty else { return }
+        let font = CTFontCreateWithName("Helvetica" as CFString, 10.0, nil)
 
         ctx.saveGState()
+        ctx.setTextDrawingMode(.fill)
 
-        // Critical: invisible text that remains selectable/searchable.
-        ctx.setTextDrawingMode(.invisible)
-        ctx.setFillColor(CGColor(gray: 0, alpha: 1))
+        // Unsichtbar (aber im PDF auswählbar)
+        ctx.setAlpha(0.0)
 
-        // Use a stable font; size will be adapted per box.
-        let baseFontName = "Helvetica"
+        for b in boxes {
 
-        for obs in observations {
-            guard let candidate = obs.topCandidates(1).first else { continue }
-            let s = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
-            if s.isEmpty { continue }
+            // Normalized -> pixel (Vision coords, origin bottom-left)
+            func toPixel(_ p: CGPoint) -> CGPoint {
+                CGPoint(x: p.x * imageSize.width, y: p.y * imageSize.height)
+            }
 
-            // Vision boundingBox is normalized to the image.
-            let bb = obs.boundingBox
+            let tlPx = toPixel(b.tl)
+            let trPx = toPixel(b.tr)
+            let brPx = toPixel(b.br)
+            let blPx = toPixel(b.bl)
 
-            let rectPx = CGRect(
-                x: bb.minX * imageSize.width,
-                y: bb.minY * imageSize.height,
-                width: bb.width * imageSize.width,
-                height: bb.height * imageSize.height
-            )
+            // Pixel -> PDF (page coords): y-flip + /renderScale
+            func toPDF(_ p: CGPoint) -> CGPoint {
+                CGPoint(
+                    x: p.x / renderScale + targetRect.origin.x,
+                    y: (imageSize.height - p.y) / renderScale + targetRect.origin.y
+                )
+            }
 
-            // Convert pixels -> PDF points (because image was rendered at renderScale)
-            let rectPt = CGRect(
-                x: rectPx.minX / renderScale,
-                y: rectPx.minY / renderScale,
-                width: rectPx.width / renderScale,
-                height: rectPx.height / renderScale
-            )
+            let tl = toPDF(tlPx)
+            let tr = toPDF(trPx)
+            let br = toPDF(brPx)
+            let bl = toPDF(blPx)
 
-            // Clamp into page
-            let r = rectPt.intersection(targetRect)
-            if r.isEmpty { continue }
+            // Baseline: bl -> br
+            let vx = br.x - bl.x
+            let vy = br.y - bl.y
+            let angle = atan2(vy, vx)
 
-            // Heuristic font size from box height.
-            let fontSize = max(6, min(72, r.height * 0.90))
-            let ctFont = CTFontCreateWithName(baseFontName as CFString, fontSize, nil)
+            let targetW = hypot(vx, vy)
+            let leftH  = hypot(tl.x - bl.x, tl.y - bl.y)
+            let rightH = hypot(tr.x - br.x, tr.y - br.y)
+            let targetH = 0.5 * (leftH + rightH)
 
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: ctFont
+            if targetW <= 1 || targetH <= 1 { continue }
+
+            // CTLine mit Basis-Font (wir skalieren gleich auf targetW/targetH)
+            let attr: [CFString: Any] = [
+                kCTFontAttributeName: font
             ]
-            let attr = NSAttributedString(string: s, attributes: attrs)
-            let line = CTLineCreateWithAttributedString(attr)
+            let attributed = CFAttributedStringCreate(nil, b.text as CFString, attr as CFDictionary)!
+            let line = CTLineCreateWithAttributedString(attributed)
 
-            // Baseline approx inside box.
-            let baseline = CGPoint(x: r.minX, y: r.minY + (r.height * 0.15))
-            ctx.textPosition = baseline
+            var ascent: CGFloat = 0
+            var descent: CGFloat = 0
+            var leading: CGFloat = 0
+            let lineW = CGFloat(CTLineGetTypographicBounds(line, &ascent, &descent, &leading))
+            let lineH = max(1, ascent + descent)
+
+            if lineW <= 1 { continue }
+
+            let sx = targetW / lineW
+            let sy = targetH / lineH
+
+            ctx.saveGState()
+            ctx.setAlpha(0.0)
+
+            // Transformation: an bl setzen, drehen, skalieren
+            ctx.translateBy(x: bl.x, y: bl.y)
+            ctx.rotate(by: angle)
+            ctx.scaleBy(x: sx, y: sy)
+
+            // Baseline: leicht nach oben (descent), damit Text nicht "absäuft"
+            ctx.textPosition = CGPoint(x: 0, y: descent)
+
             CTLineDraw(line, ctx)
+            ctx.restoreGState()
         }
 
         ctx.restoreGState()
@@ -288,6 +384,279 @@ enum VisionOCRService {
         case .artBox:   return "artBox"
         @unknown default: return "unknown"
         }
+    }
+    
+    private static func deskewForOCRIfNeeded(
+        cgImage: CGImage,
+        options: Options,
+        logger: ((String) -> Void)? = nil
+    ) -> (CGImage, CGFloat) {
+        // Winkel schätzen (radians); 0 wenn nicht zuverlässig
+        guard let angle = estimateSkewAngleRadians(cgImage: cgImage, logger: logger) else {
+            logger?("estimate=nil (zu wenig/kein Text) -> no deskew")
+            return (cgImage, 0)
+        }
+
+        let absA = abs(angle)
+        let deg = Double(angle * 180.0 / .pi)
+
+        // LOG mit mehr Auflösung
+        logger?(String(format: "estimate=%.6f rad (%.3f°)", Double(angle), deg))
+
+        let minA = options.minDeskewDegrees * .pi / 180.0
+        if Double(absA) < minA {
+            logger?(String(format: "below threshold (<%.3f°) -> no deskew", options.minDeskewDegrees))
+            return (cgImage, 0)
+        }
+
+        let maxA = options.maxDeskewDegrees * .pi / 180.0
+        if Double(absA) > maxA {
+            logger?(String(format: "above threshold (>%.1f°) -> no deskew", options.maxDeskewDegrees))
+            return (cgImage, 0)
+        }
+
+        if let rotated = rotateImageKeepingExtent(cgImage: cgImage, radians: -angle) {
+            logger?(String(format: "applied deskew: rotate by %.3f°", -deg))
+            return (rotated, angle)
+        }
+        return (cgImage, 0)
+    }
+
+    private static func estimateSkewAngleRadians(
+        cgImage: CGImage,
+        logger: ((String) -> Void)? = nil
+    ) -> CGFloat? {
+
+        // Optional: downscale für Performance (z.B. max 1400px)
+        let maxDim: CGFloat = 1400
+        let w = CGFloat(cgImage.width), h = CGFloat(cgImage.height)
+        var workImage = cgImage
+
+        if max(w, h) > maxDim,
+           let scaled = scaleCGImageLanczos(cgImage: cgImage, maxDimension: maxDim) {
+            workImage = scaled
+            logger?("skew: downscale to \(workImage.width)x\(workImage.height)")
+        }
+
+        // Winkel aus RecognizeText + Quad-Geometrie ziehen (Preview-nahe)
+        let handler = VNImageRequestHandler(cgImage: workImage, options: [:])
+
+        func run(_ level: VNRequestTextRecognitionLevel, minHeight: Float) -> [VNRecognizedTextObservation] {
+            let req = VNRecognizeTextRequest()
+            req.recognitionLevel = level
+            req.usesLanguageCorrection = false
+            req.recognitionLanguages = ["de-DE", "en-US"]
+            req.minimumTextHeight = minHeight
+
+            do {
+                try handler.perform([req])
+                return req.results ?? []
+            } catch {
+                logger?("skew: VNRecognizeTextRequest(\(level)) failed: \(error.localizedDescription)")
+                return []
+            }
+        }
+
+        // Pass 1: schnell, aber nicht zu streng (Fax/Scan!)
+        var results = run(.fast, minHeight: 0.004)
+
+        // Pass 2: falls zu wenig/leer -> accurate, ohne Mindesthöhe
+        if results.isEmpty {
+            results = run(.accurate, minHeight: 0.0)
+        }
+
+        guard !results.isEmpty else {
+            logger?("skew: no recognized text observations")
+            return nil
+        }
+
+        let W = CGFloat(workImage.width)
+        let H = CGFloat(workImage.height)
+
+        var angles: [CGFloat] = []
+        angles.reserveCapacity(256)
+
+        for obs in results {
+            guard let best = obs.topCandidates(1).first else { continue }
+            let fullRange = best.string.startIndex..<best.string.endIndex
+            guard let rect = try? best.boundingBox(for: fullRange) else { continue }
+
+            let dx = (rect.topRight.x - rect.topLeft.x) * W
+            let dy = (rect.topRight.y - rect.topLeft.y) * H
+            if abs(dx) < 1e-6 { continue }
+
+            let a = atan2(dy, dx)
+            if abs(a) < (.pi / 2.0) {
+                angles.append(a)
+            }
+        }
+
+        guard angles.count >= 4 else {
+            logger?("skew: too few angle samples (\(angles.count)) -> nil")
+            return nil
+        }
+
+        // =========================
+        // Sofortdiagnose (Signalqualität)
+        // =========================
+        let degSamples = angles.map { Double($0 * 180.0 / .pi) }
+        let small = degSamples.filter { abs($0) < 0.5 }.count
+        let pct = Int((Double(small) / Double(max(1, degSamples.count))) * 100.0)
+
+        let mean = degSamples.reduce(0.0, +) / Double(degSamples.count)
+        let varSum = degSamples.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) }
+        let stdev = sqrt(varSum / Double(max(1, degSamples.count - 1)))
+
+        // Sortieren + robuste Kennwerte
+        angles.sort()
+        let n = angles.count
+
+        func q(_ p: Double) -> CGFloat {
+            let idx = Int(Double(n - 1) * p)
+            return angles[max(0, min(n - 1, idx))]
+        }
+
+        let minA = angles.first ?? 0
+        let maxA = angles.last ?? 0
+        let p10  = q(0.10)
+        let med  = angles[n / 2]
+        let p90  = q(0.90)
+
+        logger?(
+            String(
+                format: "skew: angle-signal count=%d | <0.5°=%d (%d%%) | stdev=%.3f° | min=%.2f° p10=%.2f° med=%.2f° p90=%.2f° max=%.2f°",
+                n,
+                small,
+                pct,
+                stdev,
+                Double(minA * 180.0 / .pi),
+                Double(p10  * 180.0 / .pi),
+                Double(med  * 180.0 / .pi),
+                Double(p90  * 180.0 / .pi),
+                Double(maxA * 180.0 / .pi)
+            )
+        )
+
+        if stdev < 0.01 {
+            logger?("skew: NOTE: angle signal too flat (stdev < 0.01°) -> nil")
+            return nil
+        }
+
+        return med
+    }
+
+    private static func rotateImageKeepingExtent(cgImage: CGImage, radians: CGFloat) -> CGImage? {
+        let ci = CIImage(cgImage: cgImage)
+        let extent = ci.extent
+        let center = CGPoint(x: extent.midX, y: extent.midY)
+
+        let t = CGAffineTransform(translationX: center.x, y: center.y)
+            .rotated(by: radians)
+            .translatedBy(x: -center.x, y: -center.y)
+
+        // clamp -> rotate -> crop: kein „leerer“ Rand durch Rotation
+        let rotated = ci.clampedToExtent().transformed(by: t).cropped(to: extent)
+
+        let ctx = CIContext(options: nil)
+        return ctx.createCGImage(rotated, from: extent)
+    }
+
+    private static func scaleCGImageLanczos(cgImage: CGImage, maxDimension: CGFloat) -> CGImage? {
+        let w = CGFloat(cgImage.width), h = CGFloat(cgImage.height)
+        let scale = maxDimension / max(w, h)
+        guard scale < 1 else { return cgImage }
+
+        let ci = CIImage(cgImage: cgImage)
+        let filter = CIFilter(name: "CILanczosScaleTransform")!
+        filter.setValue(ci, forKey: kCIInputImageKey)
+        filter.setValue(scale, forKey: kCIInputScaleKey)
+        filter.setValue(1.0, forKey: kCIInputAspectRatioKey)
+
+        guard let out = filter.outputImage else { return nil }
+        let ctx = CIContext(options: nil)
+        let rect = CGRect(x: 0, y: 0, width: w * scale, height: h * scale)
+        return ctx.createCGImage(out, from: rect)
+    }
+
+    private static func mapNormalizedPointFromDeskewedToOriginal(
+        _ p: CGPoint,
+        skewAngleRadians: CGFloat,
+        imageSize: CGSize
+    ) -> CGPoint {
+        let W = imageSize.width
+        let H = imageSize.height
+
+        // normalized -> pixel (Vision coords)
+        let px = p.x * W
+        let py = p.y * H
+
+        let c = CGPoint(x: W / 2.0, y: H / 2.0)
+        let ca = cos(skewAngleRadians)
+        let sa = sin(skewAngleRadians)
+
+        // deskewed -> original: rotate by +skewAngle around center
+        let x = px - c.x
+        let y = py - c.y
+        let xr = x * ca - y * sa
+        let yr = x * sa + y * ca
+
+        let outX = xr + c.x
+        let outY = yr + c.y
+
+        // clamp + back to normalized
+        let clampedX = min(max(outX, 0), W)
+        let clampedY = min(max(outY, 0), H)
+
+        return CGPoint(x: clampedX / W, y: clampedY / H)
+    }
+    
+    private static func mapNormalizedRectFromDeskewedToOriginal(
+        _ rect: CGRect,
+        skewAngleRadians: CGFloat,
+        imageSize: CGSize
+    ) -> CGRect {
+        let W = imageSize.width
+        let H = imageSize.height
+
+        // rect (normalized) -> pixel rect (Vision coords, origin bottom-left)
+        let r = VNImageRectForNormalizedRect(rect, Int(W), Int(H))
+
+        let corners = [
+            CGPoint(x: r.minX, y: r.minY),
+            CGPoint(x: r.maxX, y: r.minY),
+            CGPoint(x: r.maxX, y: r.maxY),
+            CGPoint(x: r.minX, y: r.maxY)
+        ]
+
+        let c = CGPoint(x: W / 2.0, y: H / 2.0)
+        let ca = cos(skewAngleRadians)
+        let sa = sin(skewAngleRadians)
+
+        func rotBack(_ p: CGPoint) -> CGPoint {
+            // deskewed -> original: rotate by +skewAngle around center
+            let x = p.x - c.x
+            let y = p.y - c.y
+            let xr = x * ca - y * sa
+            let yr = x * sa + y * ca
+            return CGPoint(x: xr + c.x, y: yr + c.y)
+        }
+
+        let pts = corners.map(rotBack)
+        let minX = pts.map(\.x).min() ?? 0
+        let maxX = pts.map(\.x).max() ?? 0
+        let minY = pts.map(\.y).min() ?? 0
+        let maxY = pts.map(\.y).max() ?? 0
+
+        var mapped = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        mapped = mapped.intersection(CGRect(x: 0, y: 0, width: W, height: H))
+
+        // pixel -> normalized (Vision coords)
+        return CGRect(
+            x: mapped.origin.x / W,
+            y: mapped.origin.y / H,
+            width: mapped.size.width / W,
+            height: mapped.size.height / H
+        )
     }
     
 }

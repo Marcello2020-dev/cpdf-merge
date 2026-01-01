@@ -435,7 +435,8 @@ struct OCRView: View {
                             recognitionLevel: .accurate,
                             usesLanguageCorrection: true,
                             renderScale: 2.0,
-                            skipPagesWithExistingText: true
+                            skipPagesWithExistingText: true,
+                            enableDeskewPreprocessing: false
                         )
 
                         try VisionOCRService.ocrToSearchablePDF(
