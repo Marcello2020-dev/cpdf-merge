@@ -221,8 +221,11 @@ struct OCRView: View {
                         languages: ["de-DE", "en-US"],
                         recognitionLevel: .accurate,
                         usesLanguageCorrection: true,
-                        renderScale: 2.0,
-                        skipPagesWithExistingText: true
+                        renderScale: 3.0,
+                        skipPagesWithExistingText: true,
+                        enableDeskewPreprocessing: true,
+                        debugBandAngleEstimation: true,
+                        bandAngleBandCount: 32
                     )
 
                     try VisionOCRService.ocrToSearchablePDF(
@@ -434,9 +437,11 @@ struct OCRView: View {
                             languages: ["de-DE", "en-US"],
                             recognitionLevel: .accurate,
                             usesLanguageCorrection: true,
-                            renderScale: 2.0,
+                            renderScale: 3.0,
                             skipPagesWithExistingText: true,
-                            enableDeskewPreprocessing: false
+                            enableDeskewPreprocessing: false,
+                            debugBandAngleEstimation: true,
+                            bandAngleBandCount: 32
                         )
 
                         try VisionOCRService.ocrToSearchablePDF(
