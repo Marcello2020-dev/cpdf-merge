@@ -358,8 +358,9 @@ struct MergeView: View {
         let cpdfPath = CPDFService.defaultCPDFPath
         logText += "Backend: PDFKit (Merge + Outline)\n"
 
-        // 1) Page counts via PDFKit + build bookmark plan
-        var starts: [(title: String, startPage: Int)] = []
+        // 1) Page counts via PDFKit + build bookmark plan (including source outlines)
+        var sections: [PDFKitOutline.Section] = []
+        sections.reserveCapacity(inputPDFs.count)
         var pageCursor = 1
 
         for url in inputPDFs {
@@ -374,7 +375,19 @@ struct MergeView: View {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let title = rawTitle.isEmpty ? BookmarkTitleBuilder.defaultTitle(for: url) : rawTitle
 
-            starts.append((title: title, startPage: pageCursor))
+            let sourceNodes = PDFKitOutline.extractSourceNodes(from: doc)
+            let importedCount = PDFKitOutline.countNodes(sourceNodes)
+            if importedCount > 0 {
+                logText += "Quelle \(url.lastPathComponent): \(importedCount) bestehende Bookmarks übernommen\n"
+            }
+
+            sections.append(
+                PDFKitOutline.Section(
+                    title: title,
+                    startPage: pageCursor,
+                    sourceNodes: sourceNodes
+                )
+            )
             pageCursor += doc.pageCount
         }
 
@@ -410,8 +423,8 @@ struct MergeView: View {
         // Step 2: Apply bookmarks via PDFKit
         if let mergedDoc = PDFDocument(url: mergedTmp) {
             self.logText += "Step 2: bookmarks (PDFKit) -> \(finalTmp.lastPathComponent)\n"
-            PDFKitOutline.applyOutline(to: mergedDoc, starts: starts)
-            if mergedDoc.write(to: finalTmp) && PDFKitOutline.validateOutlinePersisted(at: finalTmp, expectedCount: starts.count) {
+            PDFKitOutline.applyOutline(to: mergedDoc, sections: sections)
+            if mergedDoc.write(to: finalTmp) && PDFKitOutline.validateOutlinePersisted(at: finalTmp, expectedCount: sections.count) {
                 // Success: save finalTmp into Output folder
                 self.isRunning = false
                 saveFinalPDF(from: finalTmp, cleanupDir: tempDir)
@@ -428,7 +441,7 @@ struct MergeView: View {
         self.logText += "Fallback: cpdf (add-bookmarks) using: \(cpdfPath)\n"
         
         do {
-            try CPDFService.writeBookmarksFile(starts: starts, to: bookmarksTxt)
+            try CPDFService.writeBookmarksFile(sections: sections, to: bookmarksTxt)
         } catch {
             self.isRunning = false
             self.statusText = "Fehler: Bookmarks-Datei"
@@ -459,4 +472,3 @@ struct MergeView: View {
         }
     }
 }
-

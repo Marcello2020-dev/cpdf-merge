@@ -57,13 +57,6 @@ enum CPDFService {
     /// Writes a cpdf bookmarks text file (format: level "Title" page open)
     static func writeBookmarksFile(starts: [(title: String, startPage: Int)],
                                    to bookmarksTxt: URL) throws {
-        func sanitizeBookmarkTitle(_ s: String) -> String {
-            s.replacingOccurrences(of: "\r", with: " ")
-                .replacingOccurrences(of: "\n", with: " ")
-                .replacingOccurrences(of: "\"", with: "'")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
         var lines: [String] = []
         lines.reserveCapacity(starts.count)
 
@@ -72,8 +65,68 @@ enum CPDFService {
             lines.append(#"0 "\#(title)" \#(s.startPage) open"#)
         }
 
-        let content = lines.joined(separator: "\n") + "\n"
+        try writeBookmarksLines(lines, to: bookmarksTxt)
+    }
 
+    /// Writes a cpdf bookmarks text file with section-level bookmarks plus imported source outline hierarchy.
+    static func writeBookmarksFile(sections: [PDFKitOutline.Section], to bookmarksTxt: URL) throws {
+        var lines: [String] = []
+        lines.reserveCapacity(max(1, sections.count * 4))
+
+        for section in sections {
+            let sectionPage = max(1, section.startPage)
+            let sectionTitle = sanitizeBookmarkTitle(section.title)
+            lines.append(#"0 "\#(sectionTitle)" \#(sectionPage) open"#)
+
+            append(
+                nodes: section.sourceNodes,
+                level: 1,
+                pageOffset: section.startPage - 1,
+                fallbackPage: sectionPage,
+                to: &lines
+            )
+        }
+
+        try writeBookmarksLines(lines, to: bookmarksTxt)
+    }
+
+    private static func append(
+        nodes: [PDFKitOutline.SourceNode],
+        level: Int,
+        pageOffset: Int,
+        fallbackPage: Int,
+        to lines: inout [String]
+    ) {
+        for node in nodes {
+            let absolutePage: Int
+            if let sourcePageIndex = node.pageIndex {
+                absolutePage = max(1, pageOffset + sourcePageIndex + 1)
+            } else {
+                absolutePage = fallbackPage
+            }
+
+            let title = sanitizeBookmarkTitle(node.title)
+            lines.append(#"\#(level) "\#(title)" \#(absolutePage) open"#)
+
+            append(
+                nodes: node.children,
+                level: level + 1,
+                pageOffset: pageOffset,
+                fallbackPage: absolutePage,
+                to: &lines
+            )
+        }
+    }
+
+    private static func sanitizeBookmarkTitle(_ s: String) -> String {
+        s.replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\"", with: "'")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func writeBookmarksLines(_ lines: [String], to bookmarksTxt: URL) throws {
+        let content = lines.joined(separator: "\n") + "\n"
         do {
             try content.write(to: bookmarksTxt, atomically: true, encoding: .utf8)
         } catch {
