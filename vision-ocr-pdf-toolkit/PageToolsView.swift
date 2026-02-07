@@ -30,6 +30,8 @@ struct PageToolsView: View {
     @State private var workingTempDirURL: URL? = nil
     @State private var selection: Set<Int> = []
     @State private var thumbnails: [Int: NSImage] = [:]
+    @State private var draggedPageIndex: Int? = nil
+    @State private var dropTargetIndex: Int? = nil
     @State private var insertMode: InsertMode = .afterSelection
 
     @State private var statusText: String = "Bereit"
@@ -165,7 +167,23 @@ struct PageToolsView: View {
                             pageNumber: row.index + 1,
                             rotation: row.rotation,
                             formatLabel: row.formatLabel,
-                            isSelected: selection.contains(row.index)
+                            isSelected: selection.contains(row.index),
+                            isDropTarget: dropTargetIndex == row.index
+                        )
+                        .onDrag {
+                            draggedPageIndex = row.index
+                            return NSItemProvider(object: NSString(string: "\(row.index)"))
+                        }
+                        .onDrop(
+                            of: [UTType.plainText, UTType.text],
+                            delegate: PageCardDropDelegate(
+                                targetIndex: row.index,
+                                draggedIndex: $draggedPageIndex,
+                                dropTargetIndex: $dropTargetIndex,
+                                performMove: { from, to in
+                                    handleDropMove(from: from, to: to)
+                                }
+                            )
                         )
                         .onTapGesture {
                             handlePageSelectionTap(row.index)
@@ -478,6 +496,54 @@ struct PageToolsView: View {
         movePage(from: idx, to: doc.pageCount - 1)
     }
 
+    private func handleDropMove(from: Int, to: Int) {
+        if selection.count > 1 && selection.contains(from) {
+            moveSelectedBlock(draggedFrom: from, to: to)
+        } else {
+            movePage(from: from, to: to)
+        }
+    }
+
+    private func moveSelectedBlock(draggedFrom from: Int, to target: Int) {
+        guard let doc = workingDoc else { return }
+
+        let moving = selection.sorted()
+        guard moving.count > 1 else {
+            movePage(from: from, to: target)
+            return
+        }
+        guard moving.contains(from) else {
+            movePage(from: from, to: target)
+            return
+        }
+        guard !moving.contains(target) else { return }
+
+        var pages: [PDFPage] = []
+        pages.reserveCapacity(moving.count)
+        for idx in moving {
+            guard idx >= 0, idx < doc.pageCount, let page = doc.page(at: idx) else { return }
+            pages.append(page)
+        }
+
+        for idx in moving.reversed() {
+            doc.removePage(at: idx)
+        }
+
+        let removedBeforeTarget = moving.filter { $0 < target }.count
+        let movingDown = from < target
+        var insertion = target - removedBeforeTarget + (movingDown ? 1 : 0)
+        insertion = min(max(insertion, 0), doc.pageCount)
+
+        for (offset, page) in pages.enumerated() {
+            doc.insert(page, at: insertion + offset)
+        }
+
+        selection = Set(insertion..<(insertion + pages.count))
+        refreshThumbnails()
+        statusText = "\(pages.count) Seiten verschoben"
+        appendStatus(statusText)
+    }
+
     private func movePage(from: Int, to: Int) {
         guard let doc = workingDoc else { return }
         guard from >= 0, from < doc.pageCount else { return }
@@ -608,6 +674,7 @@ private struct PageThumbnailCard: View {
     let rotation: Int
     let formatLabel: String
     let isSelected: Bool
+    let isDropTarget: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -631,13 +698,64 @@ private struct PageThumbnailCard: View {
         .frame(minWidth: 190, maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(isSelected ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.10))
+                .fill(isDropTarget ? Color.accentColor.opacity(0.2) : (isSelected ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.10)))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(isSelected ? Color.accentColor : Color.secondary.opacity(0.35), lineWidth: isSelected ? 2 : 1)
+                .stroke(
+                    isDropTarget ? Color.accentColor : (isSelected ? Color.accentColor : Color.secondary.opacity(0.35)),
+                    lineWidth: isDropTarget ? 3 : (isSelected ? 2 : 1)
+                )
         )
         .contentShape(Rectangle())
+    }
+}
+
+private struct PageCardDropDelegate: DropDelegate {
+    let targetIndex: Int
+    @Binding var draggedIndex: Int?
+    @Binding var dropTargetIndex: Int?
+    let performMove: (_ from: Int, _ to: Int) -> Void
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [UTType.plainText, UTType.text])
+    }
+
+    func dropEntered(info: DropInfo) {
+        dropTargetIndex = targetIndex
+    }
+
+    func dropExited(info: DropInfo) {
+        if dropTargetIndex == targetIndex {
+            dropTargetIndex = nil
+        }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        let fallback = draggedIndex
+        dropTargetIndex = nil
+        draggedIndex = nil
+
+        let providers = info.itemProviders(for: [UTType.plainText, UTType.text])
+        if let provider = providers.first {
+            provider.loadObject(ofClass: NSString.self) { item, _ in
+                guard let s = item as? NSString,
+                      let from = Int(s as String),
+                      from != targetIndex
+                else { return }
+                DispatchQueue.main.async {
+                    performMove(from, targetIndex)
+                }
+            }
+            return true
+        }
+
+        if let from = fallback, from != targetIndex {
+            performMove(from, targetIndex)
+            return true
+        }
+
+        return false
     }
 }
 
