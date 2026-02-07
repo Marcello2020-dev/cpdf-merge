@@ -79,7 +79,7 @@
 			name = "vision-ocr-pdf-toolkit";
 			packageProductDependencies = (
 			);
-			productName = "cpdf-merge";
+				productName = "vision-ocr-pdf-toolkit";
 			productReference = 1F40F4922F0151DC000544E1 /* vision-ocr-pdf-toolkit.app */;
 			productType = "com.apple.product-type.application";
 		};

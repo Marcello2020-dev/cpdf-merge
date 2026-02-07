@@ -416,7 +416,7 @@ struct MergeView: View {
         moveSelected(to: inputPDFs.count - 1)
     }
 
-    // MARK: - cpdf Merge
+    // MARK: - PDFKit Merge
     private func runMergeWithBookmarks(outputBaseName: String) {
         guard let baseOutFolder = outputFolderURL else { return }
 
@@ -479,8 +479,6 @@ struct MergeView: View {
             finalizeMove()
         }
 
-        // Resolve cpdf (robust)
-        let cpdfPath = CPDFService.defaultCPDFPath
         logText += "Backend: PDFKit (Merge + Outline)\n"
 
         // 1) Page counts via PDFKit + build bookmark plan (including source outlines)
@@ -538,7 +536,7 @@ struct MergeView: View {
 
         // Temp paths
         let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("cpdfmerge-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("pdfmerge-\(UUID().uuidString)", isDirectory: true)
 
         do {
             try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -550,7 +548,6 @@ struct MergeView: View {
         }
 
         let mergedTmp = tempDir.appendingPathComponent("merged_tmp.pdf")
-        let bookmarksTxt = tempDir.appendingPathComponent("bookmarks.txt")
         let finalTmp = tempDir.appendingPathComponent("final_tmp.pdf")
 
         // Step 1: Merge via PDFKit
@@ -566,55 +563,36 @@ struct MergeView: View {
         }
 
         // Step 2: Apply bookmarks via PDFKit
-        if let mergedDoc = PDFDocument(url: mergedTmp) {
-            self.logText += "Step 2: bookmarks (PDFKit) -> \(finalTmp.lastPathComponent)\n"
-            PDFKitOutline.applyOutline(to: mergedDoc, sections: sections)
-            let expectedRootCount = PDFKitOutline.expectedRootCount(for: sections)
-            if mergedDoc.write(to: finalTmp) && PDFKitOutline.validateOutlinePersisted(at: finalTmp, expectedCount: expectedRootCount) {
-                // Success: save finalTmp into Output folder
-                self.isRunning = false
-                saveFinalPDF(from: finalTmp, cleanupDir: tempDir)
-                return
-                
-            } else {
-                self.logText += "PDFKit outline not persisted — fallback to cpdf\n"
-            }
-        } else {
-            self.logText += "PDFKit could not reopen mergedTmp for bookmarks. Falling back to cpdf.\n"
-        }
-        
-        // Step 3: Fallback to cpdf add-bookmarks (create bookmarks.txt only now)
-        self.logText += "Fallback: cpdf (add-bookmarks) using: \(cpdfPath)\n"
-        
-        do {
-            try CPDFService.writeBookmarksFile(sections: sections, to: bookmarksTxt)
-        } catch {
+        guard let mergedDoc = PDFDocument(url: mergedTmp) else {
             self.isRunning = false
-            self.statusText = "Fehler: Bookmarks-Datei"
-            self.logText += "\(error)\n"
+            self.statusText = "Fehler: Merge-Dokument nicht lesbar"
+            self.logText += "PDFKit konnte merged_tmp.pdf nicht öffnen.\n"
             try? FileManager.default.removeItem(at: tempDir)
             return
         }
-        
-        let addArgs: [String] = [mergedTmp.path, "-add-bookmarks", bookmarksTxt.path, "-o", finalTmp.path]
-        
-        CPDFService.run(arguments: addArgs, cpdfPath: cpdfPath) { code2, out2, err2 in
-            DispatchQueue.main.async {
-                if !out2.isEmpty { self.logText += out2 + "\n" }
-                if !err2.isEmpty { self.logText += err2 + "\n" }
 
-                self.isRunning = false
+        self.logText += "Step 2: bookmarks (PDFKit) -> \(finalTmp.lastPathComponent)\n"
+        PDFKitOutline.applyOutline(to: mergedDoc, sections: sections)
+        let expectedRootCount = PDFKitOutline.expectedRootCount(for: sections)
 
-                if code2 != 0 {
-                    self.statusText = "Fehler: Bookmarks (cpdf \(code2))"
-                    // Cleanup (best-effort)
-                    try? FileManager.default.removeItem(at: tempDir)
-                    return
-                }
-
-                // Erfolgsfall: finalTmp -> Output/<name>.pdf
-                saveFinalPDF(from: finalTmp, cleanupDir: tempDir)
-            }
+        guard mergedDoc.write(to: finalTmp) else {
+            self.isRunning = false
+            self.statusText = "Fehler: Bookmarks schreiben"
+            self.logText += "PDFKit konnte final_tmp.pdf nicht schreiben.\n"
+            try? FileManager.default.removeItem(at: tempDir)
+            return
         }
+
+        guard PDFKitOutline.validateOutlinePersisted(at: finalTmp, expectedCount: expectedRootCount) else {
+            self.isRunning = false
+            self.statusText = "Fehler: Bookmarks persistieren"
+            self.logText += "PDFKit-Outline konnte nicht stabil gespeichert werden.\n"
+            try? FileManager.default.removeItem(at: tempDir)
+            return
+        }
+
+        // Success: save finalTmp into Output folder
+        self.isRunning = false
+        saveFinalPDF(from: finalTmp, cleanupDir: tempDir)
     }
 }

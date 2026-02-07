@@ -1,6 +1,6 @@
 //
 //  URLUtils.swift
-//  cpdf-merge
+//  vision-ocr-pdf-toolkit
 //
 //  Created by Marcel Mißbach on 28.12.25.
 //

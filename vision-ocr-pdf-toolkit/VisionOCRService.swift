@@ -1,6 +1,6 @@
 //
 //  VisionOCRService.swift
-//  cpdf-merge
+//  vision-ocr-pdf-toolkit
 //
 //  Created by Marcel Mißbach on 29.12.25.
 //
