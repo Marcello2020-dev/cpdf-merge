@@ -177,7 +177,6 @@ struct OCRView: View {
                         usesLanguageCorrection: true,
                         renderScale: 3.0,
                         skipPagesWithExistingText: true,
-                        enableDeskewPreprocessing: true,
                         debugBandAngleEstimation: false,
                         bandAngleBandCount: 20
                     )
