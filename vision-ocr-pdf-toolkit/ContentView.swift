@@ -11,9 +11,6 @@ struct ContentView: View {
 
             PageToolsView()
                 .tabItem { Text("Seiten") }
-
-            ToolsView()
-                .tabItem { Text("Tools") }
         }
         .frame(minWidth: 900, minHeight: 600)
         .padding()
