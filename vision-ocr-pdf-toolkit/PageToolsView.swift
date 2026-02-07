@@ -22,7 +22,7 @@ struct PageToolsView: View {
         }
     }
 
-    private static let thumbSize = CGSize(width: 68, height: 92)
+    private static let thumbSize = CGSize(width: 170, height: 220)
 
     @State private var sourceURL: URL? = nil
     @State private var workingDoc: PDFDocument? = nil
@@ -40,8 +40,7 @@ struct PageToolsView: View {
     private struct Row: Identifiable {
         let index: Int
         let rotation: Int
-        let width: Int
-        let height: Int
+        let formatLabel: String
 
         var id: Int { index }
     }
@@ -54,8 +53,7 @@ struct PageToolsView: View {
             return Row(
                 index: i,
                 rotation: page.rotation,
-                width: Int(rect.width.rounded()),
-                height: Int(rect.height.rounded())
+                formatLabel: pageFormatLabel(for: rect)
             )
         }
     }
@@ -153,33 +151,30 @@ struct PageToolsView: View {
                     .foregroundStyle(sourceURL == nil ? .secondary : .primary)
             }
 
-            Text("Seiten (Cmd-Click für Mehrfachauswahl):")
+            Text("Seitenvorschau (Cmd-Click für Mehrfachauswahl):")
                 .font(.headline)
 
-            List(selection: $selection) {
-                ForEach(rows) { row in
-                    HStack(spacing: 10) {
-                        ThumbnailCell(image: thumbnails[row.index])
-                            .frame(width: 68, height: 92)
-
-                        Text("\(row.index + 1).")
-                            .font(.system(size: 20, weight: .bold))
-                            .frame(width: 46, alignment: .trailing)
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Rotation \(row.rotation)°")
-                                .font(.system(size: 14, weight: .semibold))
-                            Text("\(row.width)x\(row.height)")
-                                .font(.system(.body, design: .monospaced))
-                                .foregroundStyle(.secondary)
+            ScrollView {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 190, maximum: 240), spacing: 12)],
+                    spacing: 12
+                ) {
+                    ForEach(rows) { row in
+                        PageThumbnailCard(
+                            image: thumbnails[row.index],
+                            pageNumber: row.index + 1,
+                            rotation: row.rotation,
+                            formatLabel: row.formatLabel,
+                            isSelected: selection.contains(row.index)
+                        )
+                        .onTapGesture {
+                            handlePageSelectionTap(row.index)
                         }
-
-                        Spacer()
                     }
-                    .tag(row.index)
                 }
+                .padding(2)
             }
-            .frame(minHeight: 320)
+            .frame(minHeight: 360)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Status:")
@@ -245,6 +240,19 @@ struct PageToolsView: View {
         statusText = "Geladen: \(first.lastPathComponent) (\(doc.pageCount) Seiten)"
         appendStatus(statusText)
         appendStatus("Arbeitskopie aktiv, Original bleibt unverändert bis Speichern.")
+    }
+
+    private func handlePageSelectionTap(_ index: Int) {
+        let mods = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if mods.contains(.command) {
+            if selection.contains(index) {
+                selection.remove(index)
+            } else {
+                selection.insert(index)
+            }
+        } else {
+            selection = [index]
+        }
     }
 
     private func rotateSelected(by delta: Int) {
@@ -547,11 +555,89 @@ struct PageToolsView: View {
         return sanitized.isEmpty ? "document" : sanitized
     }
 
+    private func pageFormatLabel(for rect: CGRect) -> String {
+        let mmPerPoint = 25.4 / 72.0
+        let widthMM = Double(rect.width) * mmPerPoint
+        let heightMM = Double(rect.height) * mmPerPoint
+
+        let short = min(widthMM, heightMM)
+        let long = max(widthMM, heightMM)
+        let orientation = rect.width >= rect.height ? "Querformat" : "Hochformat"
+
+        let dinA: [(name: String, w: Double, h: Double)] = [
+            ("A0", 841, 1189),
+            ("A1", 594, 841),
+            ("A2", 420, 594),
+            ("A3", 297, 420),
+            ("A4", 210, 297),
+            ("A5", 148, 210),
+            ("A6", 105, 148)
+        ]
+
+        var bestName = "Unbekannt"
+        var bestDelta = Double.greatestFiniteMagnitude
+
+        for fmt in dinA {
+            let s = min(fmt.w, fmt.h)
+            let l = max(fmt.w, fmt.h)
+            let delta = abs(short - s) + abs(long - l)
+            if delta < bestDelta {
+                bestDelta = delta
+                bestName = fmt.name
+            }
+        }
+
+        if bestDelta <= 12.0 {
+            return "\(bestName) \(orientation)"
+        }
+
+        return "Format unbekannt"
+    }
+
     private func appendStatus(_ line: String) {
         statusLines.append(line)
         if statusLines.count > 5 {
             statusLines.removeFirst(statusLines.count - 5)
         }
+    }
+}
+
+private struct PageThumbnailCard: View {
+    let image: NSImage?
+    let pageNumber: Int
+    let rotation: Int
+    let formatLabel: String
+    let isSelected: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ThumbnailCell(image: image)
+                .frame(width: 170, height: 220)
+
+            HStack(spacing: 6) {
+                Text("Seite \(pageNumber)")
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer(minLength: 0)
+                Text("\(rotation)°")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(formatLabel)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .padding(8)
+        .frame(minWidth: 190, maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isSelected ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isSelected ? Color.accentColor : Color.secondary.opacity(0.35), lineWidth: isSelected ? 2 : 1)
+        )
+        .contentShape(Rectangle())
     }
 }
 
