@@ -9,6 +9,9 @@ struct ContentView: View {
             OCRView()
                 .tabItem { Text("OCR") }
 
+            PageToolsView()
+                .tabItem { Text("Seiten") }
+
             ToolsView()
                 .tabItem { Text("Tools") }
         }
