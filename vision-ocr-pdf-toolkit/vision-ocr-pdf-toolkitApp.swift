@@ -10,6 +10,8 @@ import AppKit
 
 @main
 struct vision_ocr_pdf_toolkitApp: App {
+    @StateObject private var diagnosticsStore = DiagnosticsStore.shared
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -23,6 +25,13 @@ struct vision_ocr_pdf_toolkitApp: App {
                         window.setFrame(screen.visibleFrame, display: true)
                     }
                 }
+        }
+        .commands {
+            DiagnosticsCommands(diagnosticsStore: diagnosticsStore)
+        }
+
+        Window("Diagnose-Log", id: DiagnosticsLogView.windowID) {
+            DiagnosticsLogView()
         }
     }
 }

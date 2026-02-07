@@ -75,16 +75,26 @@ enum CPDFService {
 
         for section in sections {
             let sectionPage = max(1, section.startPage)
-            let sectionTitle = sanitizeBookmarkTitle(section.title)
-            lines.append(#"0 "\#(sectionTitle)" \#(sectionPage) open"#)
+            if section.preserveSourceTopLevel && !section.sourceNodes.isEmpty {
+                append(
+                    nodes: section.sourceNodes,
+                    level: 0,
+                    pageOffset: section.startPage - 1,
+                    fallbackPage: sectionPage,
+                    to: &lines
+                )
+            } else {
+                let sectionTitle = sanitizeBookmarkTitle(section.title)
+                lines.append(#"0 "\#(sectionTitle)" \#(sectionPage) open"#)
 
-            append(
-                nodes: section.sourceNodes,
-                level: 1,
-                pageOffset: section.startPage - 1,
-                fallbackPage: sectionPage,
-                to: &lines
-            )
+                append(
+                    nodes: section.sourceNodes,
+                    level: 1,
+                    pageOffset: section.startPage - 1,
+                    fallbackPage: sectionPage,
+                    to: &lines
+                )
+            }
         }
 
         try writeBookmarksLines(lines, to: bookmarksTxt)

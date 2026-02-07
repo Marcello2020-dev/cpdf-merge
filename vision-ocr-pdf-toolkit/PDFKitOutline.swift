@@ -14,6 +14,7 @@ struct PDFKitOutline {
         let title: String
         let startPage: Int   // 1-based
         let sourceNodes: [SourceNode]
+        let preserveSourceTopLevel: Bool
     }
 
     static func extractSourceNodes(from doc: PDFDocument) -> [SourceNode] {
@@ -42,17 +43,31 @@ struct PDFKitOutline {
         let root = PDFOutline()
         root.isOpen = true
 
-        for (idx, section) in sections.enumerated() {
+        for section in sections {
+            if section.preserveSourceTopLevel && !section.sourceNodes.isEmpty {
+                append(nodes: section.sourceNodes, to: root, in: mergedDoc, pageOffset: section.startPage - 1)
+                continue
+            }
+
             let parent = PDFOutline()
             parent.label = normalizedLabel(section.title)
             parent.isOpen = true
             setDestination(for: parent, in: mergedDoc, pageIndex: max(0, section.startPage - 1))
 
             append(nodes: section.sourceNodes, to: parent, in: mergedDoc, pageOffset: section.startPage - 1)
-            root.insertChild(parent, at: idx)
+            root.insertChild(parent, at: root.numberOfChildren)
         }
 
         mergedDoc.outlineRoot = root
+    }
+
+    static func expectedRootCount(for sections: [Section]) -> Int {
+        sections.reduce(0) { partial, section in
+            if section.preserveSourceTopLevel && !section.sourceNodes.isEmpty {
+                return partial + section.sourceNodes.count
+            }
+            return partial + 1
+        }
     }
 
     static func validateOutlinePersisted(at url: URL, expectedCount: Int) -> Bool {

@@ -4,18 +4,16 @@ import UniformTypeIdentifiers
 import PDFKit
 
 struct MergeView: View {
-    // HIER: deinen kompletten bisherigen ContentView-Inhalt rein
-    // also alle @State-Variablen, Helper-Funktionen und var body
-    //
-    // Tipp: In deinem bisherigen ContentView:
-    // - alles zwischen "struct ContentView: View {" und der letzten "}" kopieren
-    // - hier einfügen und "ContentView" -> "MergeView" umbenennen
-    
+    private struct SourceOutlineStats {
+        let topLevelCount: Int
+        let totalCount: Int
+    }
+
     @State private var inputPDFs: [URL] = []
     @State private var outputFolderURL: URL? = nil
 
     @State private var isRunning: Bool = false
-    @State private var logText: String = ""
+    @ObservedObject private var diagnosticsStore = DiagnosticsStore.shared
     @State private var statusText: String = "Bereit"
 
     // Output name prompt
@@ -28,6 +26,8 @@ struct MergeView: View {
     @State private var draggedItem: URL? = nil
     
     @State private var bookmarkTitles: [URL: String] = [:]   // URL -> Bookmark-Titel
+    @State private var sourceOutlineStatsByURL: [URL: SourceOutlineStats] = [:]
+    @State private var includeSourceBookmarksByURL: [URL: Bool] = [:]
     
     @State private var lastMergedPDFURL: URL? = nil         // zuletzt erzeugte Merge-PDF
     
@@ -44,6 +44,90 @@ struct MergeView: View {
             }
         }
         statusText = overwrite ? "Bookmarks neu gesetzt" : "Bookmarks ergänzt"
+    }
+
+    private func setSourceBookmarkImportForAll(_ enabled: Bool) {
+        for url in inputPDFs {
+            includeSourceBookmarksByURL[url] = enabled
+        }
+        statusText = enabled ? "Quell-Bookmarks: alle aktiv" : "Quell-Bookmarks: alle deaktiviert"
+    }
+
+    private func syncPerFileStateWithInputs() {
+        let valid = Set(inputPDFs)
+
+        bookmarkTitles = bookmarkTitles.filter { valid.contains($0.key) }
+        sourceOutlineStatsByURL = sourceOutlineStatsByURL.filter { valid.contains($0.key) }
+        includeSourceBookmarksByURL = includeSourceBookmarksByURL.filter { valid.contains($0.key) }
+
+        for url in inputPDFs {
+            if bookmarkTitles[url] == nil {
+                bookmarkTitles[url] = BookmarkTitleBuilder.defaultTitle(for: url)
+            }
+            if includeSourceBookmarksByURL[url] == nil {
+                includeSourceBookmarksByURL[url] = true
+            }
+        }
+    }
+
+    private func refreshSourceOutlineStats(for urls: [URL]) {
+        for url in urls {
+            guard sourceOutlineStatsByURL[url] == nil else { continue }
+            guard let doc = PDFDocument(url: url), let root = doc.outlineRoot else {
+                sourceOutlineStatsByURL[url] = SourceOutlineStats(topLevelCount: 0, totalCount: 0)
+                continue
+            }
+
+            let topLevelCount = root.numberOfChildren
+            let sourceNodes = PDFKitOutline.extractSourceNodes(from: doc)
+            let totalCount = PDFKitOutline.countNodes(sourceNodes)
+            sourceOutlineStatsByURL[url] = SourceOutlineStats(topLevelCount: topLevelCount, totalCount: totalCount)
+        }
+    }
+
+    private func sourceOutlineDescription(for url: URL) -> String {
+        guard let stats = sourceOutlineStatsByURL[url] else {
+            return "Quell-Bookmarks werden analysiert…"
+        }
+        if stats.totalCount == 0 {
+            return "Keine bestehenden Quell-Bookmarks"
+        }
+        let enabled = includeSourceBookmarksByURL[url] ?? true
+        if enabled {
+            return "Bestehende Quell-Bookmarks: \(stats.totalCount) (\(stats.topLevelCount) Top-Level), werden unverändert übernommen"
+        }
+        return "Bestehende Quell-Bookmarks: \(stats.totalCount) (\(stats.topLevelCount) Top-Level), Übernahme deaktiviert"
+    }
+
+    private func sourceHasBookmarks(_ url: URL) -> Bool {
+        (sourceOutlineStatsByURL[url]?.totalCount ?? 0) > 0
+    }
+
+    private func usesSourceBookmarksAsTopLevel(_ url: URL) -> Bool {
+        (includeSourceBookmarksByURL[url] ?? true) && sourceHasBookmarks(url)
+    }
+
+    private var allSourceBookmarksEnabled: Bool {
+        guard !inputPDFs.isEmpty else { return false }
+        return inputPDFs.allSatisfy { includeSourceBookmarksByURL[$0] ?? true }
+    }
+
+    private var logText: String {
+        get { diagnosticsStore.mergeLog }
+        nonmutating set { diagnosticsStore.mergeLog = newValue }
+    }
+
+    private var recentStatusLines: [String] {
+        let lines = logText
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return Array(lines.suffix(5)).map { compactStatusLine($0) }
+    }
+
+    private func compactStatusLine(_ line: String, limit: Int = 140) -> String {
+        guard line.count > limit else { return line }
+        return String(line.prefix(limit - 1)) + "…"
     }
     
     private func suggestedOutputBaseName() -> String {
@@ -83,7 +167,11 @@ struct MergeView: View {
                 
                 Button("Bookmarks zurücksetzen") { refreshBookmarksFromFilenames(overwrite: true) }
                     .disabled(inputPDFs.isEmpty || isRunning)
-                
+
+                Button(allSourceBookmarksEnabled ? "Quell-Bookmarks alle aus" : "Quell-Bookmarks alle an") {
+                    setSourceBookmarkImportForAll(!allSourceBookmarksEnabled)
+                }
+                .disabled(inputPDFs.isEmpty || isRunning)
 
                 Spacer()
                 
@@ -99,33 +187,61 @@ struct MergeView: View {
                     isRunning ||
                     FileOps.sanitizedBaseName(outputBaseName).isEmpty
                 )
-                
-                .disabled(inputPDFs.isEmpty || outputFolderURL == nil || isRunning || FileOps.sanitizedBaseName(outputBaseName).isEmpty)
             }
 
-            Text("Input (Reihenfolge = Merge-Reihenfolge; Drag & Drop zum Umsortieren):")
+            Text("Input & Bookmark-Regeln (Reihenfolge = Merge-Reihenfolge; Drag & Drop zum Umsortieren):")
                 .font(.headline)
 
             List(selection: $selection) {
                 ForEach(Array(inputPDFs.enumerated()), id: \.element) { index, url in
-                    HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 10) {
+                            Text("\(index + 1).")
+                                .font(.system(size: 20, weight: .bold))
+                                .frame(width: 42, alignment: .trailing)
 
-                        // Große, fette, konsistente Nummer (ändert sich automatisch bei Sort/Drag)
-                        Text("\(index + 1).")
-                            .font(.system(size: 20, weight: .bold))
-                            .frame(width: 42, alignment: .trailing)
+                            Text(url.lastPathComponent)
+                                .font(.system(size: 14, weight: .semibold))
+                                .lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .leading)
 
-                        Text(url.lastPathComponent)
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            Toggle("Quell-Bookmarks übernehmen", isOn: Binding(
+                                get: { includeSourceBookmarksByURL[url] ?? true },
+                                set: { includeSourceBookmarksByURL[url] = $0 }
+                            ))
+                            .toggleStyle(.switch)
+                            .font(.caption)
+                            .frame(width: 220, alignment: .trailing)
+                        }
 
-                        TextField("Bookmark", text: Binding(
-                            get: { bookmarkTitles[url] ?? BookmarkTitleBuilder.defaultTitle(for: url) },
-                            set: { bookmarkTitles[url] = $0 }
-                        ))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 360)
+                        Text(sourceOutlineDescription(for: url))
+                            .font(.caption)
+                            .foregroundStyle((sourceOutlineStatsByURL[url]?.totalCount ?? 0) > 0 ? .secondary : .tertiary)
+                            .padding(.leading, 52)
+
+                        HStack(spacing: 10) {
+                            Text("Merge-Buchmark:")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 110, alignment: .leading)
+
+                            TextField("Bookmark", text: Binding(
+                                get: { bookmarkTitles[url] ?? BookmarkTitleBuilder.defaultTitle(for: url) },
+                                set: { bookmarkTitles[url] = $0 }
+                            ))
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(usesSourceBookmarksAsTopLevel(url))
+                        }
+                        .padding(.leading, 52)
+
+                        if usesSourceBookmarksAsTopLevel(url) {
+                            Text("Kein neuer Top-Bookmark: bestehende Quell-Bookmarks bleiben oberste Ebene.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .padding(.leading, 52)
+                        }
                     }
+                    .padding(.vertical, 4)
                     .onDrag {
                         draggedItem = url
                         return NSItemProvider(object: url as NSURL)
@@ -170,11 +286,21 @@ struct MergeView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Status:")
                     .font(.headline)
+
                 Text(statusText)
-                TextEditor(text: $logText)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 140)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+
+                if !recentStatusLines.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(recentStatusLines.enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .padding(8)
+                    .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 6))
+                }
             }
 
         }
@@ -204,6 +330,8 @@ struct MergeView: View {
         
         .onChange(of: inputPDFs) { _, _ in
             outputBaseName = suggestedOutputBaseName()
+            syncPerFileStateWithInputs()
+            refreshSourceOutlineStats(for: inputPDFs)
         }
     }
 
@@ -218,12 +346,8 @@ struct MergeView: View {
         let newOnes = selected.filter { !inputPDFs.contains($0) }
         inputPDFs.append(contentsOf: newOnes)
 
-        // Für neue PDFs Default-Bookmarks setzen
-        for u in newOnes {
-            if bookmarkTitles[u] == nil {
-                bookmarkTitles[u] = BookmarkTitleBuilder.defaultTitle(for: u)
-            }
-        }
+        syncPerFileStateWithInputs()
+        refreshSourceOutlineStats(for: newOnes)
 
         // Output-Ordner nur dann automatisch setzen, wenn noch keiner gewählt ist
         if outputFolderURL == nil {
@@ -255,6 +379,7 @@ struct MergeView: View {
         let toRemove = selection
         inputPDFs.removeAll { toRemove.contains($0) }
         selection.removeAll()
+        syncPerFileStateWithInputs()
         statusText = "Entfernt: \(toRemove.count)"
     }
     
@@ -375,17 +500,37 @@ struct MergeView: View {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let title = rawTitle.isEmpty ? BookmarkTitleBuilder.defaultTitle(for: url) : rawTitle
 
-            let sourceNodes = PDFKitOutline.extractSourceNodes(from: doc)
-            let importedCount = PDFKitOutline.countNodes(sourceNodes)
-            if importedCount > 0 {
-                logText += "Quelle \(url.lastPathComponent): \(importedCount) bestehende Bookmarks übernommen\n"
+            let shouldImportSourceBookmarks = includeSourceBookmarksByURL[url] ?? true
+            let sourceNodes: [PDFKitOutline.SourceNode]
+            let preserveSourceTopLevel: Bool
+
+            if shouldImportSourceBookmarks {
+                sourceNodes = PDFKitOutline.extractSourceNodes(from: doc)
+                let importedCount = PDFKitOutline.countNodes(sourceNodes)
+                if importedCount > 0 {
+                    logText += "Quelle \(url.lastPathComponent): \(importedCount) bestehende Bookmarks unverändert übernommen\n"
+                    logText += "Quelle \(url.lastPathComponent): kein zusätzlicher Top-Bookmark erzeugt\n"
+                } else {
+                    logText += "Quelle \(url.lastPathComponent): keine bestehenden Bookmarks gefunden\n"
+                }
+                preserveSourceTopLevel = importedCount > 0
+            } else {
+                sourceNodes = []
+                let knownCount = sourceOutlineStatsByURL[url]?.totalCount ?? 0
+                if knownCount > 0 {
+                    logText += "Quelle \(url.lastPathComponent): \(knownCount) bestehende Bookmarks bewusst nicht übernommen (UI-Schalter)\n"
+                } else {
+                    logText += "Quelle \(url.lastPathComponent): Quell-Bookmarks deaktiviert\n"
+                }
+                preserveSourceTopLevel = false
             }
 
             sections.append(
                 PDFKitOutline.Section(
                     title: title,
                     startPage: pageCursor,
-                    sourceNodes: sourceNodes
+                    sourceNodes: sourceNodes,
+                    preserveSourceTopLevel: preserveSourceTopLevel
                 )
             )
             pageCursor += doc.pageCount
@@ -424,7 +569,8 @@ struct MergeView: View {
         if let mergedDoc = PDFDocument(url: mergedTmp) {
             self.logText += "Step 2: bookmarks (PDFKit) -> \(finalTmp.lastPathComponent)\n"
             PDFKitOutline.applyOutline(to: mergedDoc, sections: sections)
-            if mergedDoc.write(to: finalTmp) && PDFKitOutline.validateOutlinePersisted(at: finalTmp, expectedCount: sections.count) {
+            let expectedRootCount = PDFKitOutline.expectedRootCount(for: sections)
+            if mergedDoc.write(to: finalTmp) && PDFKitOutline.validateOutlinePersisted(at: finalTmp, expectedCount: expectedRootCount) {
                 // Success: save finalTmp into Output folder
                 self.isRunning = false
                 saveFinalPDF(from: finalTmp, cleanupDir: tempDir)
