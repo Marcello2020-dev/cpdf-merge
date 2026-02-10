@@ -60,3 +60,63 @@ struct WindowThemeApplier: NSViewRepresentable {
         }
     }
 }
+
+struct AppActionButtonStyle: ButtonStyle {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed
+        let fillStyle: AnyShapeStyle = {
+            if isEnabled {
+                return AnyShapeStyle(
+                    LinearGradient(
+                        colors: [
+                            AppTheme.primaryAccent.opacity(colorScheme == .dark ? 0.94 : 0.90),
+                            AppTheme.secondaryAccent.opacity(colorScheme == .dark ? 0.86 : 0.82)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+            }
+            return AnyShapeStyle(Color.secondary.opacity(colorScheme == .dark ? 0.24 : 0.18))
+        }()
+
+        let labelColor: Color = {
+            guard isEnabled else { return .secondary.opacity(0.85) }
+            return colorScheme == .dark ? Color.white.opacity(0.96) : Color.black.opacity(0.84)
+        }()
+
+        let strokeColor: Color = {
+            guard isEnabled else { return .secondary.opacity(0.30) }
+            return colorScheme == .dark
+                ? AppTheme.secondaryAccent.opacity(0.72)
+                : AppTheme.primaryAccent.opacity(0.90)
+        }()
+
+        return configuration.label
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(labelColor)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(fillStyle)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(strokeColor, lineWidth: 1.0)
+            }
+            .scaleEffect(pressed ? 0.985 : 1.0)
+            .opacity(pressed ? 0.93 : 1.0)
+            .shadow(
+                color: isEnabled
+                    ? (colorScheme == .dark ? .black.opacity(0.35) : .black.opacity(0.18))
+                    : .clear,
+                radius: pressed ? 1 : 2,
+                y: pressed ? 0 : 1
+            )
+            .animation(.easeOut(duration: 0.12), value: pressed)
+    }
+}

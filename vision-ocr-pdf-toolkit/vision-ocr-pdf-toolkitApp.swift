@@ -35,6 +35,7 @@ struct vision_ocr_pdf_toolkitApp: App {
         Window("Diagnose-Log", id: DiagnosticsLogView.windowID) {
             DiagnosticsLogView()
                 .tint(AppTheme.primaryAccent)
+                .buttonStyle(AppActionButtonStyle())
                 .background(WindowThemeApplier())
         }
     }
