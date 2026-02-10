@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXFileReference section */
-		1F40F4922F0151DC000544E1 /* vision-ocr-pdf-toolkit.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "vision-ocr-pdf-toolkit.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		1F40F4922F0151DC000544E1 /* Vision OCR PDF Toolkit.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Vision OCR PDF Toolkit.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -53,7 +53,7 @@
 		1F40F4932F0151DC000544E1 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				1F40F4922F0151DC000544E1 /* vision-ocr-pdf-toolkit.app */,
+				1F40F4922F0151DC000544E1 /* Vision OCR PDF Toolkit.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -79,8 +79,8 @@
 			name = "vision-ocr-pdf-toolkit";
 			packageProductDependencies = (
 			);
-			productName = "vision-ocr-pdf-toolkit";
-			productReference = 1F40F4922F0151DC000544E1 /* vision-ocr-pdf-toolkit.app */;
+			productName = "Vision OCR PDF Toolkit";
+			productReference = 1F40F4922F0151DC000544E1 /* Vision OCR PDF Toolkit.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -273,7 +273,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "vision-ocr-pdf-toolkit/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "";
+				INFOPLIST_KEY_CFBundleDisplayName = "Vision OCR PDF Toolkit";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -282,7 +282,7 @@
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "Marcello2020-dev.vision-ocr-pdf-toolkit";
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "Vision OCR PDF Toolkit";
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -306,7 +306,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "vision-ocr-pdf-toolkit/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "";
+				INFOPLIST_KEY_CFBundleDisplayName = "Vision OCR PDF Toolkit";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -315,7 +315,7 @@
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "Marcello2020-dev.vision-ocr-pdf-toolkit";
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "Vision OCR PDF Toolkit";
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
