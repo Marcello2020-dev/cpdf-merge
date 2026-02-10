@@ -11,6 +11,9 @@ struct ContentView: View {
 
             PageToolsView()
                 .tabItem { Text("Seiten") }
+
+            RedactionView()
+                .tabItem { Text("Schwärzen") }
         }
         .frame(minWidth: 900, minHeight: 600)
         .padding()

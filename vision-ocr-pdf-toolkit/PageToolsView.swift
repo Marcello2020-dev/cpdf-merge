@@ -23,6 +23,7 @@ struct PageToolsView: View {
     }
 
     private static let thumbSize = CGSize(width: 170, height: 220)
+    @Environment(\.undoManager) private var undoManager
 
     @State private var sourceURL: URL? = nil
     @State private var workingDoc: PDFDocument? = nil
@@ -45,6 +46,11 @@ struct PageToolsView: View {
         let formatLabel: String
 
         var id: Int { index }
+    }
+
+    private struct UndoSnapshot {
+        let pdfData: Data
+        let selection: Set<Int>
     }
 
     private var rows: [Row] {
@@ -277,6 +283,7 @@ struct PageToolsView: View {
         guard let doc = workingDoc else { return }
         let selected = selection.sorted()
         guard !selected.isEmpty else { return }
+        guard let before = captureUndoSnapshot() else { return }
 
         for idx in selected {
             guard let page = doc.page(at: idx) else { continue }
@@ -288,12 +295,17 @@ struct PageToolsView: View {
         refreshThumbnails()
         statusText = "\(selected.count) Seite(n) gedreht"
         appendStatus(statusText)
+
+        if let after = captureUndoSnapshot() {
+            registerUndoTransition(actionName: "Seiten drehen", undoSnapshot: before, redoSnapshot: after)
+        }
     }
 
     private func deleteSelectedPages() {
         guard let doc = workingDoc else { return }
         let selected = selection.sorted(by: >)
         guard !selected.isEmpty else { return }
+        guard let before = captureUndoSnapshot() else { return }
 
         for idx in selected {
             if idx >= 0 && idx < doc.pageCount {
@@ -311,6 +323,10 @@ struct PageToolsView: View {
         refreshThumbnails()
         statusText = "\(selected.count) Seite(n) gelöscht"
         appendStatus(statusText)
+
+        if let after = captureUndoSnapshot() {
+            registerUndoTransition(actionName: "Seiten löschen", undoSnapshot: before, redoSnapshot: after)
+        }
     }
 
     private func extractSelectedPages() {
@@ -401,6 +417,7 @@ struct PageToolsView: View {
 
     private func insertPages() {
         guard let doc = workingDoc else { return }
+        guard let before = captureUndoSnapshot() else { return }
         guard let urls = FileDialogHelpers.choosePDFs(title: "PDF(s) zum Einfügen wählen"),
               !urls.isEmpty
         else {
@@ -436,6 +453,10 @@ struct PageToolsView: View {
         refreshThumbnails()
         statusText = "\(pagesToInsert.count) Seite(n) eingefügt"
         appendStatus(statusText)
+
+        if let after = captureUndoSnapshot() {
+            registerUndoTransition(actionName: "Seiten einfügen", undoSnapshot: before, redoSnapshot: after)
+        }
     }
 
     private func splitDocument() {
@@ -506,6 +527,7 @@ struct PageToolsView: View {
 
     private func moveSelectedBlock(draggedFrom from: Int, to target: Int) {
         guard let doc = workingDoc else { return }
+        guard let before = captureUndoSnapshot() else { return }
 
         let moving = selection.sorted()
         guard moving.count > 1 else {
@@ -542,6 +564,10 @@ struct PageToolsView: View {
         refreshThumbnails()
         statusText = "\(pages.count) Seiten verschoben"
         appendStatus(statusText)
+
+        if let after = captureUndoSnapshot() {
+            registerUndoTransition(actionName: "Seiten verschieben", undoSnapshot: before, redoSnapshot: after)
+        }
     }
 
     private func movePage(from: Int, to: Int) {
@@ -550,6 +576,7 @@ struct PageToolsView: View {
         guard to >= 0, to < doc.pageCount else { return }
         guard from != to else { return }
         guard let page = doc.page(at: from) else { return }
+        guard let before = captureUndoSnapshot() else { return }
 
         doc.removePage(at: from)
         let destination = min(max(to, 0), doc.pageCount)
@@ -559,6 +586,10 @@ struct PageToolsView: View {
         refreshThumbnails()
         statusText = "Seite verschoben: \(from + 1) → \(destination + 1)"
         appendStatus(statusText)
+
+        if let after = captureUndoSnapshot() {
+            registerUndoTransition(actionName: "Seite verschieben", undoSnapshot: before, redoSnapshot: after)
+        }
     }
 
     private func resolvedInsertionIndex(for doc: PDFDocument) -> Int {
@@ -665,6 +696,45 @@ struct PageToolsView: View {
         if statusLines.count > 5 {
             statusLines.removeFirst(statusLines.count - 5)
         }
+    }
+
+    private func captureUndoSnapshot() -> UndoSnapshot? {
+        guard let doc = workingDoc, let data = doc.dataRepresentation() else { return nil }
+        return UndoSnapshot(pdfData: data, selection: selection)
+    }
+
+    private func restoreUndoSnapshot(_ snapshot: UndoSnapshot) {
+        guard let restored = PDFDocument(data: snapshot.pdfData) else { return }
+        workingDoc = restored
+
+        if restored.pageCount == 0 {
+            selection = []
+        } else {
+            let valid = snapshot.selection.filter { $0 >= 0 && $0 < restored.pageCount }
+            selection = valid.isEmpty ? [0] : Set(valid)
+        }
+
+        refreshThumbnails()
+        statusText = "Bearbeitungsstand wiederhergestellt"
+        appendStatus(statusText)
+    }
+
+    private func registerUndoTransition(
+        actionName: String,
+        undoSnapshot: UndoSnapshot,
+        redoSnapshot: UndoSnapshot
+    ) {
+        guard let manager = undoManager else { return }
+        manager.registerUndo(withTarget: UndoActionTarget.shared) { _ in
+            self.restoreUndoSnapshot(undoSnapshot)
+            self.registerUndoTransition(
+                actionName: actionName,
+                undoSnapshot: redoSnapshot,
+                redoSnapshot: undoSnapshot
+            )
+            manager.setActionName(actionName)
+        }
+        manager.setActionName(actionName)
     }
 }
 

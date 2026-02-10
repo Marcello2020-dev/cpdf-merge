@@ -9,6 +9,18 @@ struct MergeView: View {
         let totalCount: Int
     }
 
+    private struct UndoSnapshot {
+        let inputPDFs: [URL]
+        let outputFolderURL: URL?
+        let outputBaseName: String
+        let selection: Set<URL>
+        let bookmarkTitles: [URL: String]
+        let sourceOutlineStatsByURL: [URL: SourceOutlineStats]
+        let includeSourceBookmarksByURL: [URL: Bool]
+    }
+
+    @Environment(\.undoManager) private var undoManager
+
     @State private var inputPDFs: [URL] = []
     @State private var outputFolderURL: URL? = nil
 
@@ -35,8 +47,10 @@ struct MergeView: View {
     @State private var pendingMove: (() -> Void)? = nil
     @State private var pendingOverwritePath: String = ""
     @State private var pendingCleanupDirURL: URL? = nil
+    @State private var suppressInputPDFsOnChange: Bool = false
 
     private func refreshBookmarksFromFilenames(overwrite: Bool) {
+        let before = captureUndoSnapshot()
         for u in inputPDFs {
             let current = (bookmarkTitles[u] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if overwrite || current.isEmpty {
@@ -44,13 +58,16 @@ struct MergeView: View {
             }
         }
         statusText = overwrite ? "Bookmarks neu gesetzt" : "Bookmarks ergänzt"
+        registerUndoTransition(actionName: "Bookmarks aktualisieren", before: before, after: captureUndoSnapshot())
     }
 
     private func setSourceBookmarkImportForAll(_ enabled: Bool) {
+        let before = captureUndoSnapshot()
         for url in inputPDFs {
             includeSourceBookmarksByURL[url] = enabled
         }
         statusText = enabled ? "Quell-Bookmarks: alle aktiv" : "Quell-Bookmarks: alle deaktiviert"
+        registerUndoTransition(actionName: "Quell-Bookmarks umschalten", before: before, after: captureUndoSnapshot())
     }
 
     private func syncPerFileStateWithInputs() {
@@ -329,6 +346,7 @@ struct MergeView: View {
         }
         
         .onChange(of: inputPDFs) { _, _ in
+            if suppressInputPDFsOnChange { return }
             outputBaseName = suggestedOutputBaseName()
             syncPerFileStateWithInputs()
             refreshSourceOutlineStats(for: inputPDFs)
@@ -337,6 +355,7 @@ struct MergeView: View {
 
     // MARK: - UI Actions
     private func pickPDFs() {
+        let before = captureUndoSnapshot()
         guard let selected = FileDialogHelpers.choosePDFs(), !selected.isEmpty else {
             statusText = "Keine PDFs ausgewählt"
             return
@@ -357,12 +376,17 @@ struct MergeView: View {
         }
 
         statusText = "PDFs hinzugefügt: \(newOnes.count)"
+        if !newOnes.isEmpty {
+            registerUndoTransition(actionName: "PDFs hinzufügen", before: before, after: captureUndoSnapshot())
+        }
     }
     
     private func pickOutputFolder() {
+        let before = captureUndoSnapshot()
         guard let folder = FileDialogHelpers.chooseFolder() else { return }
         outputFolderURL = folder
         statusText = "Output-Ordner gesetzt"
+        registerUndoTransition(actionName: "Output-Ordner ändern", before: before, after: captureUndoSnapshot())
     }
     
     private func openLastMergedPDF() {
@@ -371,16 +395,22 @@ struct MergeView: View {
     }
 
     private func sortByFilename() {
+        let before = captureUndoSnapshot()
         inputPDFs.sort { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         statusText = "Sortiert nach Dateiname"
+        registerUndoTransition(actionName: "PDF-Liste sortieren", before: before, after: captureUndoSnapshot())
     }
 
     private func removeSelected() {
+        let before = captureUndoSnapshot()
         let toRemove = selection
         inputPDFs.removeAll { toRemove.contains($0) }
         selection.removeAll()
         syncPerFileStateWithInputs()
         statusText = "Entfernt: \(toRemove.count)"
+        if !toRemove.isEmpty {
+            registerUndoTransition(actionName: "PDFs entfernen", before: before, after: captureUndoSnapshot())
+        }
     }
     
     private var selectedSingle: URL? {
@@ -388,6 +418,7 @@ struct MergeView: View {
     }
 
     private func moveSelected(to newIndex: Int) {
+        let before = captureUndoSnapshot()
         guard let sel = selectedSingle,
               let from = inputPDFs.firstIndex(of: sel) else { return }
 
@@ -400,12 +431,49 @@ struct MergeView: View {
 
         inputPDFs = arr
         selection = [item]   // Auswahl bleibt erhalten
+        registerUndoTransition(actionName: "PDF-Reihenfolge ändern", before: before, after: captureUndoSnapshot())
     }
 
     private func moveSelectedBy(_ delta: Int) {
         guard let sel = selectedSingle,
               let from = inputPDFs.firstIndex(of: sel) else { return }
         moveSelected(to: from + delta)
+    }
+
+    private func captureUndoSnapshot() -> UndoSnapshot {
+        UndoSnapshot(
+            inputPDFs: inputPDFs,
+            outputFolderURL: outputFolderURL,
+            outputBaseName: outputBaseName,
+            selection: selection,
+            bookmarkTitles: bookmarkTitles,
+            sourceOutlineStatsByURL: sourceOutlineStatsByURL,
+            includeSourceBookmarksByURL: includeSourceBookmarksByURL
+        )
+    }
+
+    private func restoreUndoSnapshot(_ snapshot: UndoSnapshot) {
+        suppressInputPDFsOnChange = true
+        inputPDFs = snapshot.inputPDFs
+        outputFolderURL = snapshot.outputFolderURL
+        outputBaseName = snapshot.outputBaseName
+        selection = snapshot.selection
+        bookmarkTitles = snapshot.bookmarkTitles
+        sourceOutlineStatsByURL = snapshot.sourceOutlineStatsByURL
+        includeSourceBookmarksByURL = snapshot.includeSourceBookmarksByURL
+        suppressInputPDFsOnChange = false
+
+        statusText = "Bearbeitungsstand wiederhergestellt"
+    }
+
+    private func registerUndoTransition(actionName: String, before: UndoSnapshot, after: UndoSnapshot) {
+        guard let manager = undoManager else { return }
+        manager.registerUndo(withTarget: UndoActionTarget.shared) { _ in
+            self.restoreUndoSnapshot(before)
+            self.registerUndoTransition(actionName: actionName, before: after, after: before)
+            manager.setActionName(actionName)
+        }
+        manager.setActionName(actionName)
     }
 
     private func moveSelectedToTop() {
