@@ -83,8 +83,16 @@ struct OCRView: View {
                 Button("PDF im Finder zeigen") { revealCurrent() }
                     .disabled(inputPDF == nil || isRunning || isSaving)
 
-                Button("OCR Vision starten") {
+                Button {
                     runVisionOCR()
+                } label: {
+                    HStack(spacing: 8) {
+                        if isRunning {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(isRunning ? "OCR läuft…" : "OCR Vision starten")
+                    }
                 }
                 .disabled(!canRunVisionOCR)
 
