@@ -151,7 +151,16 @@ enum VisionOCRService {
         if firstRect.isEmpty { firstRect = firstRef.getBoxRect(.cropBox) }
         if firstRect.isEmpty { firstRect = CGRect(x: 0, y: 0, width: 612, height: 792) } // letzter Fallback
 
-        var dummyBox = CGRect(x: 0, y: 0, width: firstRect.width, height: firstRect.height)
+        let firstNormalizedRotation = ((Int(firstRef.rotationAngle) % 360) + 360) % 360
+        let firstHasQuarterTurn = firstNormalizedRotation == 90 || firstNormalizedRotation == 270
+        let firstTargetRect = CGRect(
+            x: 0,
+            y: 0,
+            width: firstHasQuarterTurn ? firstRect.height : firstRect.width,
+            height: firstHasQuarterTurn ? firstRect.width : firstRect.height
+        )
+
+        var dummyBox = CGRect(x: 0, y: 0, width: firstTargetRect.width, height: firstTargetRect.height)
         guard let ctx = CGContext(consumer: consumer, mediaBox: &dummyBox, nil) else {
             throw OCRError.cannotCreateOutputContext
         }
@@ -177,7 +186,17 @@ enum VisionOCRService {
             let cb = cgPage.getBoxRect(.cropBox)
             log?("Page \(pageIndex + 1): chosen=\(boxName(box)) rotation=\(cgPage.rotationAngle) mediaBox=\(mb) cropBox=\(cb)")
             
-            let targetRect = CGRect(x: 0, y: 0, width: pageBox.width, height: pageBox.height)
+            let normalizedPageRotation = ((Int(cgPage.rotationAngle) % 360) + 360) % 360
+            let hasQuarterTurn = normalizedPageRotation == 90 || normalizedPageRotation == 270
+            let targetRect = CGRect(
+                x: 0,
+                y: 0,
+                width: hasQuarterTurn ? pageBox.height : pageBox.width,
+                height: hasQuarterTurn ? pageBox.width : pageBox.height
+            )
+            // IMPORTANT: CGPDFPage.getDrawingTransform already accounts for the page's /Rotate metadata.
+            // Passing cgPage.rotationAngle here applies rotation a second time on some scanned PDFs.
+            let extraPageRotation: Int32 = 0
 
             let existing = (page.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let hasExistingText = !existing.isEmpty
@@ -193,13 +212,13 @@ enum VisionOCRService {
                     kCGPDFContextArtBox:   targetRect
                 ]
                 ctx.beginPDFPage(pageInfo as CFDictionary)
-                drawPDFPage(cgPage, into: ctx, box: box, targetRect: targetRect, rotate: cgPage.rotationAngle)
+                drawPDFPage(cgPage, into: ctx, box: box, targetRect: targetRect, rotate: extraPageRotation)
                 ctx.endPDFPage()
                 continue
             }
 
             // Render image for OCR
-            guard let cgImage = render(page: cgPage, box: box, targetRect: targetRect, rotate: cgPage.rotationAngle, scale: effectiveOptions.renderScale) else {
+            guard let cgImage = render(page: cgPage, box: box, targetRect: targetRect, rotate: extraPageRotation, scale: effectiveOptions.renderScale) else {
                 throw OCRError.cannotRenderPage(pageIndex + 1)
             }
 
@@ -208,7 +227,7 @@ enum VisionOCRService {
                 for: cgPage,
                 box: box,
                 targetRect: targetRect,
-                rotate: cgPage.rotationAngle,
+                rotate: extraPageRotation,
                 imageSize: originalSize
             )
 
@@ -388,7 +407,7 @@ enum VisionOCRService {
             if hasExistingText && effectiveOptions.replaceExistingTextLayer {
                 drawRenderedImagePage(cgImage, into: ctx, targetRect: targetRect)
             } else {
-                drawPDFPage(cgPage, into: ctx, box: box, targetRect: targetRect, rotate: cgPage.rotationAngle)
+                drawPDFPage(cgPage, into: ctx, box: box, targetRect: targetRect, rotate: extraPageRotation)
             }
             overlayInvisibleText(boxes, in: ctx, imageSize: originalSize, imageToPDF: imageToPDF)
             ctx.endPDFPage()
