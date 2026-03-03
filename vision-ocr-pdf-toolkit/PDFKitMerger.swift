@@ -21,11 +21,15 @@ struct PDFKitMerger {
     static func merge(
         _ inputs: [URL],
         to outURL: URL,
+        expectedTotalPages: Int? = nil,
         isCancelled: (() -> Bool)? = nil,
+        onPageMerged: ((Int, Int) -> Void)? = nil,
         onInputMerged: ((Int, Int) -> Void)? = nil
     ) throws {
         let out = PDFDocument()
         var insertIndex = 0
+        var mergedPages = 0
+        let totalPages = max(expectedTotalPages ?? inputs.count, 1)
 
         for (inputIndex, u) in inputs.enumerated() {
             if isCancelled?() == true {
@@ -36,9 +40,13 @@ struct PDFKitMerger {
                 if isCancelled?() == true {
                     throw CancellationError()
                 }
-                if let page = doc.page(at: i) {
-                    out.insert(page, at: insertIndex)
-                    insertIndex += 1
+                autoreleasepool {
+                    if let page = doc.page(at: i) {
+                        out.insert(page, at: insertIndex)
+                        insertIndex += 1
+                        mergedPages += 1
+                        onPageMerged?(mergedPages, totalPages)
+                    }
                 }
             }
             onInputMerged?(inputIndex + 1, inputs.count)

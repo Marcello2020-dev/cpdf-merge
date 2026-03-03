@@ -3,7 +3,7 @@ import PDFKit
 import CoreGraphics
 
 struct PDFKitOutline {
-    struct SourceNode {
+    struct SourceNode: Sendable {
         let title: String
         let pageIndex: Int?
         let children: [SourceNode]
