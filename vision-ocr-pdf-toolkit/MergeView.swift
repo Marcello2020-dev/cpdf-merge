@@ -36,6 +36,8 @@ struct MergeView: View {
     @State private var lastMergedPDFURL: URL? = nil         // zuletzt erzeugte Merge-PDF
     @State private var suppressInputPDFsOnChange: Bool = false
     @State private var waitCursorPushed: Bool = false
+    @State private var showMergeSuccessMarker: Bool = false
+    @State private var mergeSuccessHideWorkItem: DispatchWorkItem? = nil
 
     private func refreshBookmarksFromFilenames(overwrite: Bool) {
         let before = captureUndoSnapshot()
@@ -145,6 +147,25 @@ struct MergeView: View {
         waitCursorPushed = false
     }
 
+    private func scheduleMergeSuccessMarkerHide() {
+        mergeSuccessHideWorkItem?.cancel()
+        let work = DispatchWorkItem {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                showMergeSuccessMarker = false
+            }
+            mergeSuccessHideWorkItem = nil
+        }
+        mergeSuccessHideWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: work)
+    }
+
+    private func markMergeSuccess() {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            showMergeSuccessMarker = true
+        }
+        scheduleMergeSuccessMarkerHide()
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
 
@@ -182,6 +203,13 @@ struct MergeView: View {
                 
                 Button("Merge-PDF im Finder zeigen") { openLastMergedPDF() }
                     .disabled(lastMergedPDFURL == nil || isRunning)
+
+                if showMergeSuccessMarker && !isRunning {
+                    Label("Merge fertig", systemImage: "checkmark.circle.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.green)
+                        .transition(.opacity.combined(with: .scale))
+                }
 
                 Button("Merge") {
                     runMergeWithBookmarks()
@@ -272,6 +300,8 @@ struct MergeView: View {
         }
         .onDisappear {
             syncWaitCursor(with: false)
+            mergeSuccessHideWorkItem?.cancel()
+            mergeSuccessHideWorkItem = nil
         }
     }
 
@@ -401,6 +431,9 @@ struct MergeView: View {
             return
         }
 
+        mergeSuccessHideWorkItem?.cancel()
+        mergeSuccessHideWorkItem = nil
+        showMergeSuccessMarker = false
         isRunning = true
         
         func saveFinalPDF(from tmpURL: URL, cleanupDir: URL, destination outFile: URL) {
@@ -426,6 +459,7 @@ struct MergeView: View {
                 }
 
                 self.lastMergedPDFURL = outFile
+                self.markMergeSuccess()
             } catch {}
         }
 
